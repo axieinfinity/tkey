@@ -65,8 +65,6 @@ class ThresholdKey implements ITKey {
 
   shares: ShareStorePolyIDShareIndexMap;
 
-  privKey: BN;
-
   lastFetchedCloudMetadata: Metadata;
 
   metadata: Metadata;
@@ -85,6 +83,8 @@ class ThresholdKey implements ITKey {
 
   haveWriteMetadataLock: string;
 
+  private privKey?: BN;
+
   constructor(args?: TKeyArgs) {
     const { enableLogging = false, modules = {}, serviceProvider, storageLayer, manualSync = false } = args || {};
     this.enableLogging = enableLogging;
@@ -92,7 +92,7 @@ class ThresholdKey implements ITKey {
     this.storageLayer = storageLayer;
     this.modules = modules;
     this.shares = {};
-    this.privKey = undefined;
+    this._setKey(undefined);
     this.manualSync = manualSync;
     this._refreshMiddleware = {};
     this._reconstructKeyMiddleware = {};
@@ -114,7 +114,7 @@ class ThresholdKey implements ITKey {
       modules,
       manualSync,
     });
-    if (privKey) tb.privKey = new BN(privKey, "hex");
+    if (privKey) await tb._setKey(new BN(privKey, "hex"));
 
     for (const key in shares) {
       if (Object.prototype.hasOwnProperty.call(shares, key)) {
@@ -408,7 +408,7 @@ class ThresholdKey implements ITKey {
     if (this.metadata.pubKey.x.cmp(reconstructedPubKey.x) !== 0) {
       throw CoreError.incorrectReconstruction();
     }
-    this._setKey(privKey);
+    await this._setKey(privKey);
 
     const returnObject = {
       privKey,
@@ -456,7 +456,7 @@ class ThresholdKey implements ITKey {
     if (!this.metadata) {
       throw CoreError.metadataUndefined();
     }
-    if (!this.privKey) {
+    if (!(await this._getKey())) {
       throw CoreError.privateKeyUnavailable();
     }
     const shareIndexToDelete = new BN(shareIndex, "hex");
@@ -493,7 +493,7 @@ class ThresholdKey implements ITKey {
     if (!this.metadata) {
       throw CoreError.metadataUndefined();
     }
-    if (!this.privKey) {
+    if (!(await this._getKey())) {
       throw CoreError.privateKeyUnavailable();
     }
     const pubPoly = this.metadata.getLatestPublicPolynomial();
@@ -512,7 +512,7 @@ class ThresholdKey implements ITKey {
     if (!this.metadata) {
       throw CoreError.metadataUndefined();
     }
-    if (!this.privKey) {
+    if (!(await this._getKey())) {
       throw CoreError.privateKeyUnavailable();
     }
     if (threshold > newShareIndexes.length) {
@@ -522,7 +522,7 @@ class ThresholdKey implements ITKey {
     // update metadata nonce
     this.metadata.nonce += 1;
 
-    const poly = generateRandomPolynomial(threshold - 1, this.privKey);
+    const poly = generateRandomPolynomial(threshold - 1, await this._getKey());
     const shares = poly.generateShares(newShareIndexes);
     const existingShareIndexes = this.metadata.getShareIndexesForPolynomial(previousPolyID);
 
@@ -593,7 +593,7 @@ class ThresholdKey implements ITKey {
       return newShareStores[shareIndex].share.share;
     });
 
-    const AuthMetadatas = this.generateAuthMetadata({ input: [...metadataToPush, ...newShareMetadataToPush] });
+    const AuthMetadatas = await this.generateAuthMetadata({ input: [...metadataToPush, ...newShareMetadataToPush] });
 
     // Combine Authmetadata and service provider ShareStore
     await this.addLocalMetadataTransitions({
@@ -623,9 +623,9 @@ class ThresholdKey implements ITKey {
   } = {}): Promise<InitializeNewKeyResult> {
     if (!importedKey) {
       const tmpPriv = generatePrivate();
-      this._setKey(new BN(tmpPriv));
+      await this._setKey(new BN(tmpPriv));
     } else {
-      this._setKey(new BN(importedKey));
+      await this._setKey(new BN(importedKey));
     }
 
     // create a random poly and respective shares
@@ -637,15 +637,15 @@ class ThresholdKey implements ITKey {
     let poly: Polynomial;
     if (determinedShare) {
       const shareIndexForDeterminedShare = generatePrivateExcludingIndexes([new BN(1), new BN(0)]);
-      poly = generateRandomPolynomial(1, this.privKey, [new Share(shareIndexForDeterminedShare, determinedShare)]);
+      poly = generateRandomPolynomial(1, await this._getKey(), [new Share(shareIndexForDeterminedShare, determinedShare)]);
       shareIndexes.push(shareIndexForDeterminedShare);
     } else {
-      poly = generateRandomPolynomial(1, this.privKey);
+      poly = generateRandomPolynomial(1, await this._getKey());
     }
     const shares = poly.generateShares(shareIndexes);
 
     // create metadata to be stored
-    const metadata = new Metadata(getPubKeyPoint(this.privKey));
+    const metadata = new Metadata(getPubKeyPoint(await this._getKey()));
     metadata.addFromPolynomialAndShares(poly, shares);
     const serviceProviderShare = shares[shareIndexes[0].toString("hex")];
     const shareStore = new ShareStore(serviceProviderShare, poly.getPolynomialID());
@@ -662,7 +662,7 @@ class ThresholdKey implements ITKey {
       return shares[shareIndex.toString("hex")].share;
     });
 
-    const authMetadatas = this.generateAuthMetadata({ input: metadataToPush });
+    const authMetadatas = await this.generateAuthMetadata({ input: metadataToPush });
 
     // because this is the first time we're setting metadata there is no need to acquire a lock
     // acquireLock: false. Force push
@@ -683,7 +683,7 @@ class ThresholdKey implements ITKey {
     }
 
     const result = {
-      privKey: this.privKey,
+      privKey: await this._getKey(),
       deviceShare: new ShareStore(shares[shareIndexes[1].toString("hex")], poly.getPolynomialID()),
       userShare: undefined,
     };
@@ -845,8 +845,16 @@ class ThresholdKey implements ITKey {
     return new ShareStore(shareMap[shareIndexParsed.toString("hex")], polyIDToSearch);
   }
 
-  _setKey(privKey: BN): void {
+  async _setKey(privKey?: BN): Promise<void> {
     this.privKey = privKey;
+  }
+
+  _getKey(): Promise<BN | undefined> {
+    return Promise.resolve(this.privKey);
+  }
+
+  _getOriginKey(): string | undefined {
+    return this.privKey?.toString("hex");
   }
 
   getCurrentShareIndexes(): string[] {
@@ -887,31 +895,31 @@ class ThresholdKey implements ITKey {
 
   // Auth functions
 
-  generateAuthMetadata(params: { input: Metadata[] }): AuthMetadata[] {
+  async generateAuthMetadata(params: { input: Metadata[] }): Promise<AuthMetadata[]> {
     const { input } = params;
     const authMetadatas = [];
     for (let i = 0; i < input.length; i += 1) {
-      authMetadatas.push(new AuthMetadata(input[i], this.privKey));
+      authMetadatas.push(new AuthMetadata(input[i], await this._getKey()));
     }
     return authMetadatas;
   }
 
-  setAuthMetadata(params: { input: Metadata; serviceProvider?: IServiceProvider; privKey?: BN }): Promise<{
+  async setAuthMetadata(params: { input: Metadata; serviceProvider?: IServiceProvider; privKey?: BN }): Promise<{
     message: string;
   }> {
     const { input, serviceProvider, privKey } = params;
-    const authMetadata = new AuthMetadata(input, this.privKey);
+    const authMetadata = new AuthMetadata(input, await this._getKey());
     return this.storageLayer.setMetadata({ input: authMetadata, serviceProvider, privKey });
   }
 
   async setAuthMetadataBulk(params: { input: Metadata[]; serviceProvider?: IServiceProvider; privKey?: BN[] }): Promise<void> {
-    if (!this.privKey) {
+    if (!(await this._getKey())) {
       throw CoreError.privateKeyUnavailable();
     }
     const { input, serviceProvider, privKey } = params;
     const authMetadatas = [] as AuthMetadata[];
     for (let i = 0; i < input.length; i += 1) {
-      authMetadatas.push(new AuthMetadata(input[i], this.privKey));
+      authMetadatas.push(new AuthMetadata(input[i], await this._getKey()));
     }
     await this.addLocalMetadataTransitions({ input: authMetadatas, serviceProvider, privKey });
   }
@@ -962,7 +970,7 @@ class ThresholdKey implements ITKey {
   // Lock functions
   async acquireWriteMetadataLock(): Promise<number> {
     if (this.haveWriteMetadataLock) return this.metadata.nonce;
-    if (!this.privKey) {
+    if (!(await this._getKey())) {
       throw CoreError.privateKeyUnavailable();
     }
 
@@ -992,7 +1000,7 @@ class ThresholdKey implements ITKey {
       should only ever be updated by getting metadata)`);
     }
 
-    const res = await this.storageLayer.acquireWriteLock({ privKey: this.privKey });
+    const res = await this.storageLayer.acquireWriteLock({ privKey: await this._getKey() });
     if (res.status !== 1) throw CoreError.acquireLockFailed(`lock cannot be acquired from storage layer status code: ${res.status}`);
 
     // increment metadata nonce for write session
@@ -1003,7 +1011,7 @@ class ThresholdKey implements ITKey {
 
   async releaseWriteMetadataLock(): Promise<void> {
     if (!this.haveWriteMetadataLock) throw CoreError.releaseLockFailed("releaseWriteMetadataLock - don't have metadata lock to release");
-    const res = await this.storageLayer.releaseWriteLock({ privKey: this.privKey, id: this.haveWriteMetadataLock });
+    const res = await this.storageLayer.releaseWriteLock({ privKey: await this._getKey(), id: this.haveWriteMetadataLock });
     if (res.status !== 1) throw CoreError.releaseLockFailed(`lock cannot be released from storage layer status code: ${res.status}`);
     this.haveWriteMetadataLock = "";
   }
@@ -1121,13 +1129,13 @@ class ThresholdKey implements ITKey {
   }
 
   async encrypt(data: Buffer): Promise<EncryptedMessage> {
-    if (!this.privKey) throw CoreError.privateKeyUnavailable();
-    return encrypt(getPubKeyECC(this.privKey), data);
+    if (!(await this._getKey())) throw CoreError.privateKeyUnavailable();
+    return encrypt(getPubKeyECC(await this._getKey()), data);
   }
 
   async decrypt(encryptedMessage: EncryptedMessage): Promise<Buffer> {
-    if (!this.privKey) throw CoreError.privateKeyUnavailable();
-    return decrypt(toPrivKeyECC(this.privKey), encryptedMessage);
+    if (!(await this._getKey())) throw CoreError.privateKeyUnavailable();
+    return decrypt(toPrivKeyECC(await this._getKey()), encryptedMessage);
   }
 
   async _setTKeyStoreItem(moduleName: string, data: TkeyStoreItemType): Promise<void> {
@@ -1232,7 +1240,7 @@ class ThresholdKey implements ITKey {
     return {
       shares: this.shares,
       enableLogging: this.enableLogging,
-      privKey: this.privKey ? this.privKey.toString("hex") : undefined,
+      privKey: this._getOriginKey(),
       metadata: this.metadata,
       lastFetchedCloudMetadata: this.lastFetchedCloudMetadata,
       _localMetadataTransitions: this._localMetadataTransitions,

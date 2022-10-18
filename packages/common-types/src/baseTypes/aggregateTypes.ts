@@ -284,8 +284,6 @@ export interface ITKey extends ITKeyApi, ISerializable {
 
   shares: ShareStorePolyIDShareIndexMap;
 
-  privKey: BN;
-
   _localMetadataTransitions: LocalMetadataTransitions;
 
   manualSync: boolean;
@@ -306,7 +304,11 @@ export interface ITKey extends ITKeyApi, ISerializable {
 
   _initializeNewKey(params: { userInput?: BN; initializeModules?: boolean }): Promise<InitializeNewKeyResult>;
 
-  _setKey(privKey: BN): void;
+  _setKey(privKey?: BN): void;
+
+  _getKey(): Promise<BN | undefined>;
+
+  _getOriginKey(): string | undefined;
 
   getKeyDetails(): KeyDetails;
 }
